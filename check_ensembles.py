@@ -74,7 +74,7 @@ class TimeCheck(object):
         # self.problemdict = {}
         # self.find_interfile_problems()
         # print(self.time_info[0])
-        
+
     def get_files(self, path, pattern):
         files = [os.path.join(path, f) for f in os.listdir(path)
                  if re.search(pattern, f)]
@@ -257,6 +257,39 @@ class TestTimeCheck(unittest.TestCase):
         self.assertRaises(RuntimeError, self.tc.check_has_variable, 'testvar')
 
 
+    # @mock.patch('check_ensembles.nc.Dataset')
+    # def test_getattribute(self, mock_ncds):
+    #     my_dict = {'time': 10, 'tante': 20}
+    #     def mydict(name):
+    #         return(my_dict[name])
+    #     mock_ncds.return_value.variables.__getitem__.side_effect = (
+    #         lambda x: 'hello')
+
+    #     #mock_ncds.variables.__getitem__ = mock.Mock(side_effect=mydict)
+    #     res = self.tc.getattribute()
+    #     print(res)
+
+    # def getattribute(self):
+    #     f = '/net/atmos/data/ENSEMBLES-RCM/A1B/ETHZ/DM/ETHZ-CLM_SCN_HadCM3Q0_DM_25km_2041-2050_vas.nc'
+    #     #return(nc.Dataset(f).variables['time'].ncattrs())
+    #     return(nc.Dataset(f).variables['time'])
+
+    @mock.patch('check_ensembles.nc.Dataset')    
+    def test_check_has_attribute(self, mock_ncds):
+        mock_ds = mock.Mock('check.ensembles.TimeCheck.ds')
+        mock_ds.__getitem__ = lambda x: 
+        
+        class Myvar(object):
+            def ncattrs():
+                return(['att1', 'att2'])
+        myvar = Myvar()
+        mock_ncds.Dataset.variables.__getitem__.side_effect = myvar
+        self.tc.check_has_attr('whatevervar', 'time')
+        
+    # def check_has_attr(self, variable, attribute):
+    #     res = [attribute in d.variables[variable].ncattrs() for d in self.ds]
+
+
 if __name__ == "__main__":
     unittest.main()
     # path = "/data/ENSEMBLES-RCM/A1B/ETHZ/DM"
@@ -267,7 +300,11 @@ if __name__ == "__main__":
     # print(tc.check_has_time())
     # print(tc.check_calendar())
                   
-                
+
+
+
+                            
+    
 
     
     
