@@ -26,6 +26,14 @@ import re
 import cPickle
 import multiprocessing as mp
 from collections import Counter
+from scipy.stats import describe
+
+# Pattern that extracts start- and endyear from filename
+# into group(1) and group(2) of re.MatchObject respectively.
+FN_YEAR_PATTERN = r".*_(\d{4})-(\d{4})_.*.nc"
+
+# Path-prefix to reach storage-host
+PREFIX = "/"
 
 
 class CFConventions(object):
@@ -58,7 +66,6 @@ class GlobalCheck(object):
                           .format(path+'/'+pat, nofiles))
                     print('\n'.join(tc.files))
 
-
     def mk_pattern(self, variable):
         return(".*_{}\.nc".format(variable))
 
@@ -70,7 +77,6 @@ class TimeCheck(object):
     a regular expression that define the files of the dataset.
     '''
     def __init__(self, path, pattern):
-        #print("Checking path: {}\n         pattern: {}".format(path, pattern))
         self.path = path
         self.pattern = pattern
         self.cfco = CFConventions()
@@ -87,19 +93,16 @@ class TimeCheck(object):
         print("checking dataset: {}/{}".format(self.path, self.pattern))
         print("Has time:units? {}"
               .format(self.check_has_attr('time', 'units')))
-        print("Has same time:units ? {}"
-              .format(self.check_has_same_attr('time', 'units')))
+        print("Has same time:units ? {} - {}"
+              .format(self.check_has_same_attr('time', 'units'), self.units))
         print("time:units = \"days\"? {}"
               .format(self.check_timeunit_is_days()))
         print("Has time:calendar? {}"
               .format(self.check_has_attr('time', 'calendar')))
-        print("Has same calendar? {}"
-              .format(self.check_has_same_attr('time', 'calendar')))
+        print("Has same calendar? {} - {}"
+              .format(self.check_has_same_attr('time', 'calendar'), self.calendar))
         print("Has valid calendar unit? {}"
               .format(self.check_calendar_unit_is_valid()))
-        # self.time_get_info()
-        # self.problemdict = {}
-        # self.find_interfile_problems()
 
     def get_files(self):
         self.files = [os.path.join(self.path, f) for f in os.listdir(self.path)
@@ -140,6 +143,7 @@ class TimeCheck(object):
             pp.pprint(dict(zip(self.files, atts)))
             return("ERROR")
         else:
+            exec("self.{} = \"{}\"".format(attribute, atts[0]))
             return("OK")
 
     def check_calendar_unit_is_valid(self):
@@ -160,21 +164,6 @@ class TimeCheck(object):
                   " not implemented.")
         return("ERROR")
 
-    # def check_has_variable(self, variable):
-    #     '''Checks whether all files have variable "variable"'''
-    #     res = [variable in d.variables.keys() for d in self.ds]
-    #     if not all(res):
-    #         notime = [f[0] for f in zip(self.files, res) if not f[1]]
-    #         raise RuntimeError(
-    #             "Files without variable \"{}\" found: {}"
-    #             .format(variable, notime))
-    #     else:
-    #         print("All files have variable \"{}\".".format(variable))
-    #         return(True)
-
-    # def ncdftime2datetime(self, t):
-    #     return(datetime.datetime(*t.timetuple()[0:5]))
-
     def time_get_info(self):
         for d in self.ds:
             tim = d.variables['time']
@@ -183,30 +172,21 @@ class TimeCheck(object):
             filename = os.path.basename(d.filepath())
             yield((filename, timesteps, span))
             
-        # tim = [d.variables['time'] for d in self.ds]
-        # timesteps = [t[:] for t in tim]
-        # spans = [(t[0], t[-1]) for t in timesteps]
-        # shouldsteps = [np.arange(s[0], s[1]+1) for s in spans]
-        # self.time_info = zip(tim, timesteps, spans, shouldsteps) 
-
-    # def find_interfile_problems(self):
-    #     continuity = []
-    #     for idx in range(0, len(self.files) - 1):
-    #         continuity.append(
-    #             self.time_info[idx+1][2][0] == self.time_info[idx][2][1] + 1)
-    #     if all(continuity):
-    #         print("No gaps in-between files")
-    #     else:
-    #         print("Gaps between files detected")
-    #         self.gaps = continuity
-
-    # def _time_global_check(self):
-    #     globerrors = [list(set(t[1]) ^ set(t[3])) for t in self.time_info]
-    #     anygloberrors = any([len(g) > 0 for g in globerrors])
-    #     return(globerrors if anygloberrors else False)
+    def find_interfile_problems(self):
+        err = False
+        for idx in range(0, len(self.files) - 1):
+            a_end = self.ds[idx].variables['time'][-1]
+            b_start = self.ds[idx + 1].variables['time'][0]
+            if not (b_start == a_end + 1):
+                fna = os.path.basename(self.ds[idx].filepath())
+                fnb = os.path.basename(self.ds[idx + 1].filepath())
+                print("ERROR: non-continuous between {} and {}"
+                      .format(fna, fnb))
+                err = True
+        if not err:
+            print("{} OK".format(os.path.join(self.path, self.pattern)))
 
     def check_timesteps(self):
-        print("Checking timesteps")
         for f in self.time_get_info():
             print(f[0]),
             if self.check_timestep_span(f):
@@ -242,230 +222,194 @@ class TimeCheck(object):
         # dubletten
         if len(sts) != len(ts):
             dubs = [k for k, v in Counter(ts).items() if v > 1]
-            return("non-unique timesteps: {}".format(dubs))
+            dubsdates = nc.num2date(dubs, self.units, self.calendar)
+            dubsdates = [x.strftime("%Y-%m-%d") for x in dubsdates]
+            return("non-unique timesteps: {} = {}".format(dubs, dubsdates))
         if sts.issubset(sshould):
-            miss = sshould - sts
-            return("missing timesteps: {}".format(list(miss)))
+            miss = list(sshould - sts)
+            missdates = nc.num2date(miss, self.units, self.calendar)
+            missdates = [x.strftime("%Y-%m-%d") for x in missdates]
+            return("missing timesteps: {}={}".format(miss, missdates))
         elif sshould.issubset(sts):
-            extra = sts - sshould
-            return("extra timesteps: {}".format(list(extra)))
+            extra = list(sts - sshould)
+            extradates = nc.num2date(extra, self.units, self.calendar)
+            extradates = [x.strftime("%Y-%m-%d") for x in extradates]
+            return("extra timesteps: {}={}".format(extra, extradates))
         else:
-            nomatch = sts ^ sshould
+            nomatch = list(sts ^ sshould)
             if len(nomatch) > 0:
-                return("non-matching timesteps: {}".format(list(nomatch)))
+                nomatchdates = nc.num2date(nomatch, self.units, self.calendar)
+                nomatchdates = [x.strftime("%Y-%m-%d") for x in nomatchdates]
+                return("non-matching timesteps: {}={}"
+                       .format(nomatch, nomatchdates))
             else:
                 return(False)
 
 
+class FixTimeAxis(object):
+    ''' Replaces time-axis of a netcdf-file base on time:calendar,
+    time:units and years taken from filename'''
+    def __init__(self, filename):
+        print("reading file: {}".format(filename))
+        self.filename = filename
+        res = re.search(FN_YEAR_PATTERN,
+                        os.path.basename(filename))
+        self.starty = int(res.group(1))
+        self.endy = int(res.group(2))
+        print("startyear: {}   endyear: {}".format(self.starty, self.endy))
+
+    def new_timeaxis(self):
+        print("replacing time-axis")
+        ds = nc.Dataset(self.filename, "a")
+        units = ds.variables['time'].getncattr('units')
+        calendar = ds.variables['time'].getncattr('calendar')
+        ts = ds.variables['time'][:]
+        print("calendar: {}".format(calendar))
+        print("units: {}".format(units))
+        if not re.match("days since", units):
+            sys.exit("units of days necessary; aborting")
+        print("No timesteps: {}".format(len(ts)))
+        print("ts[0]: {}   ts[end]: {}".format(ts[0], ts[-1]))
+        start = datetime.datetime(self.starty, 1, 1, 12)
+        end = datetime.datetime(self.endy, 12, 31, 12)
+        diff = end - start
+        alldays = [start + datetime.timedelta(days=x)
+                   for x in range(0, diff.days + 1)]
+        if calendar == '360_day':
+            # We assume the file contains full years !!!
+            no_years = len(set([x.year for x in alldays]))
+            days_360 = 360 * no_years
+            ts_start = nc.date2num(start, units, calendar)
+            ts_new = np.arange(ts_start, ts_start + days_360)
+            print("replacing with ts[0]: {}   ts[end]: {}"
+                  .format(ts_new[0], ts_new[-1]))
+            ds.variables['time'][:] = ts_new
+            ds.sync()
+            ds.close()
+            print("finished")
+        elif calendar == 'standard':
+            ts_start = nc.date2num(start, units, calendar)
+            ts_new = np.arange(ts_start, ts_start + len(alldays))
+            print("replacing with ts[0]: {}   ts[end]: {}"
+                  .format(ts_new[0], ts_new[-1]))
+            ds.variables['time'][:] = ts_new
+            ds.sync()
+            ds.close()
+            print("finished")
+        else:
+            print("Calendar {} not implemented".format(calendar))
 
 
-                    
+class CheckValues(object):
+    def __init__(self, path, pattern, variable):
+        self.variable = variable
+        self.path = path
+        self.pattern = pattern
+        self.get_files()
+        self.sort_files()
+        self._mk_ds()
+
+    def get_files(self):
+        self.files = [os.path.join(self.path, f) for f in os.listdir(self.path)
+                      if re.search(self.pattern, f)]
+        self.files.sort()
+        if len(self.files) == 0:
+            raise RuntimeError(
+                "No files found for dataset with path={} and pattern={}."
+                .format(self.path, self.pattern))
+
+    def sort_files(self):
+        '''Sorts files according to first date.'''
+        starttimes = [nc.Dataset(f).variables['time'][0] for f in self.files]
+        filetuples = zip(self.files, starttimes)
+        filetuples.sort(key=lambda f: f[1])
+        self.files = [f[0] for f in filetuples]
+
+    def _mk_ds(self):
+        '''Returns netCDF4 - Objects for all files'''
+        self.ds = [nc.Dataset(f) for f in self.files]
+
+    def collect_values(self):
+        mami = []
+        fields = (x.variables[self.variable][:] for x in self.ds)
+        mami = np.array([(np.min(x), np.max(x)) for x in fields])
+        print(mami)
             
-        # if self.no_dates_should > self.tim.shape[0]:
-        #     print("dates missing!")
-        #     miss = self.time_find_missing()
-        #     print(miss)
-        #     return(-1)
-        # elif self.tim.shape[0] > self.no_dates_should:
-        #     print("too much dates!")
-        #     return(1)
-        # else:
-        #     print("number of dates ok!")
-        #     return(0)
 
-    # def time_find_missing(self):
-    #     sshould = set(np.arange(self.tim[0], self.tim[-1]+1))
-    #     sis = set(self.timesteps)
-    #     return(list(sshould - sis))
-
-    # def time_check(self):
-    #     sshould = set(np.arange(self.tim[0], self.tim[-1]+1))
-    #     sis = set(self.timesteps)
-    #     return(list(sshould ^ sis))
-
-    # def check_continuity(self, date1, date2, calendar):
-    #     if (calendar == '360_day' and
-    #         ((date1.year == date2.year and
-    #           date2.month == date1.month + 1 and
-    #           date1.day == 30 & date2.day == 1) or
-    #          (date1.year == date2.year - 1 and
-    #           date1.month == 12 and date2.month == 1 and
-    #           date1.day == 30 and date2.day == 1))):
-    #         deltat = datetime.timedelta(days=2)
-    #     else:
-    #         deltat = datetime.timedelta(days=1)
-    #     return(date1 + deltat == date2)
-    
-    # def get_timestep_count(self):
-    #     tscount = []
-    #     for d in self.ds:
-    #         tc.get_files()
-    #         tc._mk_ds()
-    #         tscount.append(d.variables['time'][:].shape[0])
-
-    # def mk_boxplot(self):
-    #     for d in self.ds:
-    #         a = d.variables['time']
-    #         print(a.shape)
-
-        
+   
+# Functions to run checks and fixes in parallel
+def run_tests(combi):
+    tc = TimeCheck(combi[0], combi[1])
+    print("Initial checks")
+    tc.init()
+    print("Checking timesteps")
+    tc.check_timesteps()
+    print("Checking continuity:")
+    tc.find_interfile_problems()
 
 
-    
-    
+def run_fix(f):
+    tf = FixTimeAxis(f)
+    tf.new_timeaxis()
+
 
 if __name__ == "__main__":
-    prefix = ""
-    paths = ["{}/data/ENSEMBLES-RCM/A1B/CNRM_ARPEGE_new/DM".format(prefix),
-             "{}/data/ENSEMBLES-RCM/A1B/DMI_ECHAM5/DM".format(prefix),
-             "{}/data/ENSEMBLES-RCM/A1B/ETHZ/DM".format(prefix),
-             "{}/data/ENSEMBLES-RCM/A1B/HadRM3Q0/DM".format(prefix),
-             "{}/data/ENSEMBLES-RCM/A1B/ICTP/DM".format(prefix),
-             "{}/data/ENSEMBLES-RCM/A1B/KNMI/DM".format(prefix),
-             "{}/data/ENSEMBLES-RCM/A1B/MPI/DM".format(prefix),
-             "{}/data/ENSEMBLES-RCM/A1B/SMHI_BCM/DM".format(prefix),
-             "{}/data/ENSEMBLES-RCM/A1B/SMHI_ECHAM5/DM".format(prefix),
-             "{}/data/ENSEMBLES-RCM/A1B/SMHI_HadCM3Q3_new/DM".format(prefix)]
 
+# ############## MODIFY THIS ##################################################
+
+    # paths to model/experiment specific simulation data
+    paths = ["data/ENSEMBLES-RCM/A1B/CNRM_ARPEGE_new/DM",
+             "data/ENSEMBLES-RCM/A1B/DMI_ECHAM5/DM",
+             "data/ENSEMBLES-RCM/A1B/ETHZ/DM",
+             "data/ENSEMBLES-RCM/A1B/HadRM3Q0/DM",
+             "data/ENSEMBLES-RCM/A1B/ICTP/DM",
+             "data/ENSEMBLES-RCM/A1B/KNMI/DM",
+             "data/ENSEMBLES-RCM/A1B/MPI/DM",
+             "data/ENSEMBLES-RCM/A1B/SMHI_BCM/DM",
+             "data/ENSEMBLES-RCM/A1B/SMHI_ECHAM5/DM",
+             "data/ENSEMBLES-RCM/A1B/SMHI_HadCM3Q3_new/DM"]
     variables = ["tasmax", "tasmin", "pr", "rsds", "hurs", "wss"]
 
-    # sizdict = {}
-    def run_tests(combi):
-        tc = TimeCheck(combi[0], combi[1])
-        tc.check_timesteps()
-        #tc.init()
-        
-    gc = GlobalCheck(paths, variables, output=False)
+
+#  path to directory that contains files in the need of fixing
+#  files that need fixing
+    # fixpath = "data/ENSEMBLES-RCM/A1B/SMHI_HadCM3Q3_new/DM"
+
+    # fixfiles = [
+    #     "SMHIRCA_A1B_HadCM3Q3_DM_25km_1951-1960_tasmin.nc",
+    #     "SMHIRCA_A1B_HadCM3Q3_DM_25km_1961-1970_tasmin.nc",
+    #     "SMHIRCA_A1B_HadCM3Q3_DM_25km_1971-1980_pr.nc",
+    #     "SMHIRCA_A1B_HadCM3Q3_DM_25km_1981-1990_pr.nc",
+    #     "SMHIRCA_A1B_HadCM3Q3_DM_25km_1991-2000_pr.nc",
+    #     "SMHIRCA_A1B_HadCM3Q3_DM_25km_1951-1960_tasmax.nc",
+    #     "SMHIRCA_A1B_HadCM3Q3_DM_25km_1961-1970_tasmax.nc",
+    #     "SMHIRCA_A1B_HadCM3Q3_DM_25km_1961-1970_rsds.nc",
+    #     "SMHIRCA_A1B_HadCM3Q3_DM_25km_1971-1980_rsds.nc",
+    #     "SMHIRCA_A1B_HadCM3Q3_DM_25km_1951-1960_hurs.nc",
+    #     "SMHIRCA_A1B_HadCM3Q3_DM_25km_1961-1970_hurs.nc",
+    #     "SMHIRCA_A1B_HadCM3Q3_DM_25km_1951-1960_wss.nc",
+    #     "SMHIRCA_A1B_HadCM3Q3_DM_25km_1961-1970_wss.nc"]
+
+    fixpath = "data/ENSEMBLES-RCM/A1B/SMHI_BCM/DM"
+    fixfiles = ["SMHIRCA_A1B_BCM_DM_25km_2061-2070_hurs.nc",
+                "SMHIRCA_A1B_BCM_DM_25km_2071-2080_hurs.nc",
+                "SMHIRCA_A1B_BCM_DM_25km_2081-2090_hurs.nc"]
+
+
+# ##############################################################################
+    paths = [os.path.join(PREFIX, x) for x in paths]
+    fixpaths = [os.path.join(PREFIX, fixpath, f) for f in fixfiles]
+    
+    # p = mp.Pool(processes=8)
+    # p.map(run_fix, fixpaths)
+ 
+    gc = GlobalCheck(paths, variables, output=True)
     p = mp.Pool()
     p.map(run_tests, gc.combis)
 
+    # valuepaths = ["/data/ENSEMBLES-RCM/A1B/SMHI_BCM/DM"]
+    # valuevars = ['tasmax']
+    # gc = GlobalCheck(valuepaths, valuevars, output=True)
+    # cv = CheckValues(gc.combis[0][0], gc.combis[0][1], 'tasmax')
+    # cv.collect_values()
 
-### Ad Hoc
-
-def rewrite_timesteps(filename, start, end):
-    ds = nc.Dataset(filename, "a")
-    units = ds.variables['time'].getncattr('units')
-    calendar = ds.variables['time'].getncattr('calendar')
-    ts = ds.variables['time'][:]
-    print("Calendar: {}".format(calendar))
-    print("Units: {}".format(units))
-    print("No timesteps: {}".format(len(ts)))
-    print("ts[0]: {}   ts[end]: {}".format(ts[0], ts[-1]))
-    diff = end - start
-    alldays = [start + datetime.timedelta(days=x)
-               for x in range(0, diff.days + 1)]
-    if calendar == '360_day':
-        ## We assume the file contains full years !!!
-        no_years =  len(set([x.year for x in alldays]))
-        days_360 = 360 * no_years
-        ts_start = nc.date2num(start, units, calendar)
-        ts_new = np.arange(ts_start, ts_start + days_360)
-        ds.variables['time'][:] = ts_new
-        ds.sync()
-        ds.close()
-        #jstart = nc.date2num(start, units, calendar)
-        
-    else:
-        print("Calendar {} not implemented".format(calendar))
-
-    
-
-# filename = ("/net/atmos/data/ENSEMBLES-RCM/A1B/SMHI_HadCM3Q3_new/DM/" +
-#             "SMHIRCA_A1B_HadCM3Q3_DM_25km_1951-1960_tasmax.nc")
-# filename = ("/net/atmos/data/ENSEMBLES-RCM/A1B/SMHI_HadCM3Q3_new/DM/" +
-#             "SMHIRCA_A1B_HadCM3Q3_DM_25km_1971-1980_tasmax.nc")
-# filename = ("/net/atmos/data/ENSEMBLES-RCM/A1B/SMHI_HadCM3Q3_new/DM/" +
-#             "SMHIRCA_A1B_HadCM3Q3_DM_25km_1981-1990_tasmax.nc")
-# filename = ("/net/atmos/data/ENSEMBLES-RCM/A1B/SMHI_BCM/DM/" +
-#             "SMHIRCA_A1B_BCM_DM_25km_2061-2070_hurs.nc")
-filename="SMHIRCA_A1B_HadCM3Q3_DM_25km_1971-1980_pr.nc"
-
-
-start = datetime.datetime(1971,1,1,12)
-end = datetime.datetime(1980,12,31,12)
-res = rewrite_timesteps(filename,start,end)
-
-LAUFT !!! Jetzt echt reparieren!
-
-
-
-# rewrite_timesteps(
-
-# for combi in gc.combis:
-#         tc = TimeCheck(combi[0], combi[1])
-#         #tc.init()
-#         # for i in tc.time_get_info(): 
-#         #     print(i)
-        
-#         del tc
-
-        # tc.get_files()
-        # tc._mk_ds()
-        # for d in tc.ds:
-        #     sizdict[os.path.basename(d.filepath())] = [d.variables['time'].shape,
-        #                                               d.variables['time'].getncattr('calendar')] 
-        # tc.mk_boxplot()
-    # print(sizdict)
-
-
-
-    # print(tc.files)
-    # print(tc.check_has_time())
-    # print(tc.check_calendar())
-
-    # basepath = '
-    # models = ['CNRM_ARPEGE_new', 'DMI_ECHAM5', 'ETHZ', 'HadRM3Q0',
-    #           'ICTP', 'KNMI', 'MPI', 'SMHI_BCM', 'SMHI_ECHAM5',
-    #           'SMHI_HadCM3Q3_new']
-    # time_frequency = 'DM'
-    # variables = ['tasmax', 'tasmin', 'pr', 'rsds', 'hurs', 'wss']
-
-    # model = models[7]
-    # problemdict = {}
-    # resfilename = "tim_check_result_{}.cpy".format(model)
-    # for variable in variables:
-    #     problemdict[(model, variable)] = {}
-    #     try:
-    #         TC = TimeCheck(basepath, model, time_frequency, variable)
-    #     except RuntimeError as rte:
-    #         print(str(rte))
-    #         sys.exit(1)
-    #     old_enddate = False
-    #     for fn in TC.filenames:
-    #         TC.set_file(fn)
-    #         print(fn)
-    #         print("From: {} To: {}".format(TC.startdate, TC.enddate))
-    #         if old_enddate:
-    #             if TC.check_continuity(old_enddate, TC.startdate, TC.tim.calendar):
-    #                 print("file continuity: OK!")
-    #             else:
-    #                 print("ERROR: files not continuous!")
-    #                 if 'continuity' in problemdict[(model, variable)]:
-    #                     problemdict[(model, variable)]['continuity'].append(
-    #                         (os.path.basename(fn), old_enddate, TC.startdate))
-    #                 else:
-    #                     problemdict[(model, variable)]['continuity'] = [
-    #                         (os.path.basename(fn), old_enddate, TC.startdate)]
-    #         else:
-    #             problemdict[(model, variable)]['fromto'] = [str(TC.startdate)]
-    #         old_enddate = TC.enddate
-    #         globdiff = TC.time_check()
-    #         if len(globdiff) == 0:
-    #             print("Timesteps as expected!")
-    #         else:
-    #             print("Problem with timesteps here:")
-    #             print(globdiff)
-    #             miss = TC. time_find_missing()
-    #             misslist = [TC.ncdftime2datetime(
-    #                 nc.num2date(x, TC.tim.units, TC.tim.calendar))
-    #                 for x in miss]
-    #             print("Missing: {}".format(misslist))
-    #             problemdict[(model, variable)]['missing'] = (
-    #                 os.path.basename(fn), globdiff,
-    #                 [str(x) for x in misslist])
-    #     problemdict[(model, variable)]['fromto'].append(str(TC.enddate))
-    # cPickle.dump(problemdict, open(resfilename, 'wb'), protocol=-1)
-
-    #
-    # get wrong calendar entries
-    # parallel "ncdump -h  {} | grep 'calendar = \"days\"' | sed 's/\(^.*$\)/\1 {}/p' " ::: *.nc
